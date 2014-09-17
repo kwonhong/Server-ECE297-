@@ -1,0 +1,15 @@
+server_host localhost
+server_port 1119
+username admin
+password xxxnq.BMCifhU
+table threecols col1:int,col2:int,col3:char[10]
+table fourcols col1:char[10] , col2:int , col3:int , col4:char[20]
+table sixcols col1:char[10],col2:char[20] , col3:int, col4:int ,col5:int ,col6:int
+table table4 col1:int,col2:int,col3:char[10]
+table table5 col1:int,col2:int,col3:char[10]
+table table6 col1:int,col2:int,col3:char[10]
+table table7 col1:int,col2:int,col3:char[10]
+table table8 col1:int,col2:int,col3:char[10]
+table table9 col1:int,col2:int,col3:char[10]
+table table10 col1:int,col2:int,col3:char[10]
+

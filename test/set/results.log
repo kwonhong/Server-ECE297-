@@ -1,0 +1,8 @@
+Running suite SET Testing!!!!!
+main.c:249:P:test_with_table_name_null:test_with_table_name_null:0: Passed
+main.c:259:P:non_exisiting_table:non_exisiting_table:0: Passed
+main.c:268:P:correct_table_input_for_first_table:correct_table_input_for_first_table:0: Passed
+main.c:277:P:correct_table_input_for_second_table:correct_table_input_for_second_table:0: Passed
+main.c:286:P:correct_table_input_for_third_table:correct_table_input_for_third_table:0: Passed
+Results for all suites run:
+100%: Checks: 5, Failures: 0, Errors: 0

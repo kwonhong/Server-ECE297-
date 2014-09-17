@@ -1,0 +1,471 @@
+/**
+ * @file
+ * @brief This file contains the implementation of the storage server
+ * interface as specified in storage.h.
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include "storage.h"
+#include "utils.h"
+#include "config_parser.tab.h"
+
+#define SUCCESS 7
+
+extern int ThreadCounter;
+
+FILE *ClientFileLog;
+extern struct config_params params;
+
+
+
+/**
+ * @brief Connect to the server
+ *
+ * @param hostname The hostname the client enters.
+ * @param port The port the client enters on.
+ * @return void
+ */
+void* storage_connect(const char *hostname, const int port)
+{
+	if (hostname == NULL) {
+		errno = ERR_INVALID_PARAM;
+		return NULL;
+	}
+
+	//Checks the port if valid or not
+	if(port<=0){
+		errno = ERR_INVALID_PARAM;
+		return NULL;
+	}
+
+	// Create a socket.
+	int sock = socket(PF_INET, SOCK_STREAM, 0);
+	if (sock < 0){
+		errno = ERR_INVALID_PARAM;
+		return NULL;
+	}
+		
+	printf("%s %d\n",hostname,port);
+
+	//logger
+	char tempString [MAX_STRING_SIZE];
+	sprintf(tempString, "[LOG] CONNECT Request Made. Hostname: %s Port: %d\n", hostname, port);
+	logger(ClientFileLog,tempString);	//Arash Khazaei: An attempt will be made to access data from sever
+
+	// Get info about the server.
+	struct addrinfo serveraddr, *res;
+	
+	memset(&serveraddr, 0, sizeof serveraddr);
+	serveraddr.ai_family = AF_UNSPEC;
+	serveraddr.ai_socktype = SOCK_STREAM;
+	char portstr[MAX_PORT_LEN];
+	snprintf(portstr, sizeof portstr, "%d", port);
+	
+	int status = getaddrinfo(hostname, portstr, &serveraddr, &res);
+	if (status != 0){
+		errno = ERR_CONNECTION_FAIL;
+		return NULL;
+	}
+		
+	// Connect to the server.
+	status = connect(sock, res->ai_addr, res->ai_addrlen);
+	if (status != 0){
+		errno = ERR_CONNECTION_FAIL;
+		return NULL;
+	}
+
+	return (void*) sock;
+}
+
+/**
+ * @brief Authenticate the client allow for getting and setting
+ *
+ * @param username The username the client enters to access the server.
+ * @param password The password the client uses to verify if they are allowed to access the server.
+ * @return 0 on success, -1 if otherwise
+ */
+int storage_auth(const char *username, const char *passwd, void *conn)
+{
+	// Connection is really just a socket file descriptor.
+	int sock = (int)conn;
+	
+	if(conn==NULL){
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+	if (username == NULL || passwd == NULL) { 
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+
+	//logger
+	char tempString[MAX_STRING_SIZE];
+	sprintf(tempString, "[LOG] AUTHENTICATE Request Made. Username:%s Password: %s\n", username, passwd);
+	logger(ClientFileLog,tempString);	//Arash Khazaei: An attempt will be made access data from server
+	
+	// Send some data.
+	char buf[MAX_CMD_LEN];
+	char *bufferPointer = buf;
+	memset(buf, 0, sizeof buf); // setting buf to all '0'
+
+
+	//ecnrypte the password
+	char *encrypted_passwd = generate_encrypted_password(passwd, NULL);
+	snprintf(buf, sizeof buf, "AUTH#%s#%s#\n", username, encrypted_passwd);
+	if (sendall(sock, buf, strlen(buf)) == 0 && recvline(sock, buf, sizeof buf) == 0){ 
+
+		if (strcmp(buf, "SUCCESS") == 0){
+			return 0;
+		} 
+
+		//Parses whether successful or an error occured
+		char *status = getNextWord(&bufferPointer, '#');
+		char *error;
+
+		//Paramters to extract error number
+		long int errorCode;
+		char *p;
+
+
+		if (strlen(status)==SUCCESS){//If status = SUCCESS
+			return 0;
+		}
+		else{
+			error = getNextWord(&bufferPointer, '#');
+			errorCode = strtol(error, &p, 10);
+			errno = errorCode;
+			return -1;
+		}
+		free(status);
+		free(error);
+	}
+	//Should not get here unless something failed
+	//Set errno to unknown?
+	return -1;
+}
+
+/**
+ * @brief Get the stored table and key with the correct value
+ *
+ * @param table A table stored in the database.
+ * @param key A key in the table
+ * @param record A pointer to the record structure that holds the needed value
+ * @return 0 on success, -1 if otherwise
+ */
+int storage_get(const char *table, const char *key, struct storage_record *record, void *conn)
+{
+	// Connection is really just a socket file descriptor.
+	int sock = (int)conn;
+
+	//MAY STILL NEEED TO CHECK RECORD VALUE
+	//Check if parameters are valid
+	if (record == NULL || key == NULL || table == NULL || conn==NULL )	{
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+
+	if( !parameterCheck(table) || !parameterCheck(key) ){
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+	// Send some data.
+	char buf[MAX_CMD_LEN];
+	char *bufferPointer = buf;
+	char tempString[MAX_STRING_SIZE];
+	sprintf(tempString, "[LOG] GET Request Made. Table: %s Key: %s\n", table, key);
+	logger(ClientFileLog,tempString);	//Arash Khazaei: An attempt is made to request data from Server
+	memset(buf, 0, sizeof buf);
+	snprintf(buf, sizeof buf, "GET#%s#%s#\n", table, key);
+	if (sendall(sock, buf, strlen(buf)) == 0 && recvline(sock, buf, sizeof buf) == 0) {
+		
+
+		//strncpy(record->value, buf, sizeof record->value);
+		
+		//Parses whether successful or an error occured
+		char *status = getNextWord(&bufferPointer, '#');
+		char *error;
+		char *key;
+		char *value;
+		char *version;
+
+		//Parameters to extract error number
+		long int errorCode;
+		long int metadata;
+		char *p;
+		
+		if (strcmp(status, "SUCCESS") == 0){//If status == SUCCESS
+			key = getNextWord(&bufferPointer, '#');
+
+			//Get the value and copy to the record value member
+			value = getNextWord(&bufferPointer, '#');
+			strncpy(record->value, value, sizeof record->value);
+			version = getNextWord(&bufferPointer, '#');
+			metadata = strtol(version, &p, 10);
+			record->metadata[0] = metadata;
+
+			free(status);
+			free(value);
+			free(version);
+			free(key);
+			return 0;
+		}
+
+		else{//If status == error
+			error = getNextWord(&bufferPointer, '#');
+			//Get the error code from the server and set the errno variable to the corresponding error
+			errorCode = strtol(error, &p, 10);
+			errno = errorCode;
+			free(status);
+			free(error);
+			return -1;
+			}
+		
+
+	}
+	//Should not get here unless something failed
+	return -1;
+}
+
+
+/**
+ * @brief Get the stored table and key with the correct value
+ *
+ * @param table A table stored in the database.
+ * @param key A key in the table
+ * @param record A pointer to the record structure that holds the needed value
+ * @return 0 on success, -1 if otherwise
+ */
+int storage_set(const char *table, const char *key, struct storage_record *record, void *conn)
+{
+	
+	// Connection is really just a socket file descriptor.
+	int sock = (int)conn;
+	char *keyPrint = key;
+	//MAY STILL NEEED TO CHECK RECORD VALUE
+
+	//printf("%d\n",record->metadata[0]);
+	
+	if (table == NULL || key == NULL ) {
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+	// Send some data.
+	char buf[MAX_CMD_LEN];
+	char *bufferPointer = buf;
+	char metadata[MAX_STRING_SIZE];
+
+	printf("Before record check\n");	
+	//Check if parameters are valid
+	if(record != NULL){
+		if( !parameterCheck(table) || !parameterCheck(key) || conn==NULL || !recordCheck(record->value) ){
+			errno = ERR_INVALID_PARAM;
+			return -1;
+		}
+		printf("Before Storing metadata\n");	
+		sprintf(metadata,"%d",(record->metadata)[0]);
+		printf("After Storing metadata\n");	
+		memset(buf, 0, sizeof buf);
+		snprintf(buf, sizeof buf, "SET#%s#%s#%s#%s#\n", table, key, record->value, metadata);
+		//snprintf(buf, sizeof buf, "SET#%s#%s#%s#%s#\n", table, key, record->value, "15");
+		printf("%s\n",buf);
+	}
+	else{
+		
+		memset(buf, 0, sizeof buf);
+		snprintf(buf, sizeof buf, "SET#%s#%s#%s#%s#\n", table, key, "", "-1");
+		printf("%s\n",buf);
+	}
+
+	//LOG TO FILE
+	//char tempString[MAX_STRING_SIZE];
+	//sprintf(tempString, "[LOG] SET Request Made. Table: %s Key: %s\n", table, key);
+	//logger(ClientFileLog,tempString);	//Arash Khazaei: An attempt will be made to modify data to server
+	//END LOG TO FILE
+	printf("After record check\n");
+
+	if (sendall(sock, buf, strlen(buf)) == 0 && recvline(sock, buf, sizeof buf) == 0) {
+ 
+		//Parses whether successful or an error occured
+		char *status = getNextWord(&bufferPointer, '#');
+		char *error;
+		char *key;
+		char *value;
+
+		//Parameters to extract error number
+		long int errorCode;
+		char *p;		
+
+		if (strcmp(status, "SUCCESS")==0){//If status == SUCCESS
+			free(status);
+			return 0;
+		}
+
+		else if(strcmp(status, "MODIFY") == 0){
+			printf("Modified key: %s @ %s\n",record->value,keyPrint);
+			free(status);
+			return 0;
+		}
+
+		else if(strcmp(status, "INSERT") == 0){
+			printf("Inserted key: %s @ %s\n",record->value, keyPrint);
+			free(status);
+			return 0;
+		}
+
+		else if(strcmp(status, "DELETE") == 0){
+			printf("Deleted key: %s\n",keyPrint);
+			free(status);
+			return 0;
+		}
+
+		else if(strcmp(status, "UPLOAD") == 0){
+			printf("Uploaded Table: %s\n",table);
+			free(status);
+			return 0;
+		}
+		else{//If status == error
+			error = getNextWord(&bufferPointer, '#');
+			//Get the error code from the server and set the errno variable to the corresponding error
+			errorCode = strtol(error, &p, 10);
+			errno = errorCode;
+			free(status);
+			free(error);
+			return -1;
+		}
+		//Should not get here unless something failed
+		return -1;
+	}
+}
+
+//
+
+int storage_query(const char *table, const char *predicates, char **keys, const int max_keys, void *conn)
+{
+
+	//Check if parameters are valid
+	if (table == NULL || predicates == NULL || conn==NULL || keys == NULL)	{
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+	predicates = myStrDup (predicates);
+	// Connection is really just a socket file descriptor.
+	int sock = (int)conn;
+	long int keysFound = 0;
+
+	if( !parameterCheck(table) || !queryCheck(predicates)){
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+	// Send some data.
+	char buf[MAX_CMD_LEN];
+	char *bufferPointer = buf;
+	//LOG TO FILE
+	char tempString[MAX_STRING_SIZE];
+	sprintf(tempString, "[LOG] QUERY Request Made. Table: %s Predicates: %s\n", table, predicates);
+	logger(ClientFileLog,tempString);	//Arash Khazaei: An attempt will be made to modify data to server
+	//END LOG TO FILE
+
+	memset(buf, 0, sizeof buf);
+	snprintf(buf, sizeof buf, "QUERY#%s#%s#%d#\n", table, predicates, max_keys);
+
+
+	if (sendall(sock, buf, strlen(buf)) == 0 && recvline(sock, buf, sizeof buf) == 0) {
+
+		
+		//Parses whether successful or an error occured
+		char *status = getNextWord(&bufferPointer, '#');
+		char *error;
+		char *keyNumber;
+		char *keyMessage;
+
+		//Parameters to extract error number
+		long int errorCode;
+		char *p;		
+
+		if (strcmp(status, "SUCCESS")==0){//If status == SUCCESS
+			//NEED TO PARSE PROPERLY
+			keyNumber = getNextWord(&bufferPointer, '#');
+			keysFound = strtol(keyNumber,&p,10);
+			int x;
+   	 		for (x = 0; x < max_keys ; x++){
+   	 			if(x<keysFound){
+   	 				keyMessage = getNextWord(&bufferPointer, '#');
+   	 				printf("%s\n",keyMessage );
+   	 				strcpy(keys[x],keyMessage);
+   	 				free(keyMessage);
+   	 			}
+   	 		}
+			free(status);
+			free(keyNumber);
+			free (predicates);
+			return keysFound;
+		}
+		else{//If status == error
+			error = getNextWord(&bufferPointer, '#');
+			//Get the error code from the server and set the errno variable to the corresponding error
+			errorCode = strtol(error, &p, 10);
+			errno = errorCode;
+			free(status);
+			free(error);
+			free (predicates);
+			return -1;
+		}
+		//Should not get here unless something failed
+		return -1;
+
+
+	}
+		free (predicates);
+		return 0;
+}
+
+/**
+ * @brief Closes the connection to the server
+ *
+ * @param conn A pointer to the connection structure
+ * @return 0 on success, -1 if otherwise
+ */
+int storage_disconnect(void *conn)
+{
+
+	// Cleanup
+	if (conn == NULL){
+		errno = ERR_INVALID_PARAM;
+		return -1;
+	}
+
+	int sock = (int)conn;
+	// Send some data.
+	/*char buf[MAX_CMD_LEN];
+	char *bufferPointer = buf;
+	memset(buf, 0, sizeof buf); // setting buf to all '0'
+
+	if (params.concurrencyMode == 2) {
+		snprintf(buf, sizeof buf, "DISCONNECT#\n");
+		if (sendall(sock, buf, strlen(buf)) == 0 && recvline(sock, buf, sizeof buf) == 0) {
+			if (strcmp(buf, "SUCCESS") == 0){
+				return 0;
+			} 
+			else {
+				errno = ERR_UNKNOWN;
+			}
+		}
+	} else {*/
+		close(sock);
+	//}
+	return 0;
+}
+

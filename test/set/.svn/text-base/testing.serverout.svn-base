@@ -1,0 +1,17 @@
+table number is 0
+table number is 1
+table number is 2
+[LOG] Server on localhost:6786
+[LOG] Got a connection from 127.0.0.1:14006.
+[LOG] Processing command 'SUCCESS'
+column number = 6 
+correct size type char
+correct size type char
+it is an integer
+it is an integer
+it is an integer
+it is an integer
+[PERFORMANCE] Server SET Processing Time: 3.000000 microseconds.
+[PERFORMANCE] Current Server Total Processing Time: 3.000000 microseconds.
+[LOG] Processing command 'INSERT#'
+[LOG] Closed connection from 127.0.0.1:14006.

@@ -1,0 +1,967 @@
+/**
+ * @file
+ * @brief This file implements the storage server.
+ *
+ * The storage server should be named "server" and should take a single
+ * command line argument that refers to the configuration file.
+ * 
+ * The storage server should be able to communicate with the client
+ * library functions declared in storage.h and implemented in storage.c.
+ */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <string.h>
+#include <assert.h>
+#include <signal.h>
+#include "utils.h"
+#include <time.h>
+#include "hashTable.h"
+#include "config_parser.tab.h"
+#define MAX_LISTENQUEUELEN 20	///< The maximum number of queued connections.
+/*
+	LOGGING CONTROL CAPABILITY FOR SERVER REQUESTS
+	0 - NO OUTPUT
+	1 - PRINTED OUTPUT
+	2 - PRINTED TO FILE OUTPUT
+*/
+#define LOGGING 2
+// don't change it to 10!!!!!!!!!!!!!!!!!!!!!!!!
+// 11 is the right number
+#define MAX_THREADS 11
+
+extern int ThreadCounter;
+
+struct _ThreadInfo { 
+  struct sockaddr_in clientaddr;
+  socklen_t clientaddrlen; 
+  int clientsock; 
+  pthread_t theThread; 
+}; 
+
+typedef struct _ThreadInfo *ThreadInfo; 
+
+/*  Thread buffer, and circular buffer fields */ 
+ThreadInfo runtimeThreads[MAX_THREADS]; 
+unsigned int botRT = 0, topRT = 0;
+
+/* Mutex to guard print statements */ 
+pthread_mutex_t  printMutex    = PTHREAD_MUTEX_INITIALIZER; 
+
+/* Mutex to guard condition -- used in getting/returning from thread pool*/ 
+pthread_mutex_t conditionMutex = PTHREAD_MUTEX_INITIALIZER;
+/* Condition variable -- used to wait for avaiable threads, and signal when available */ 
+pthread_cond_t  conditionCond  = PTHREAD_COND_INITIALIZER;
+
+pthread_mutex_t getMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t setMutex = PTHREAD_MUTEX_INITIALIZER;
+//pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+	Global Variable File Names for Server Access & Session Access
+
+*/
+
+FILE *ServerFileLog;
+extern HashTable *ourHashTable[MAX_TABLES];
+
+// Read the config file.
+extern struct config_params params;
+extern struct config_params census_params;
+
+//Reading the command line
+char *commandPointer ;
+char *command ;
+char *message ;
+char **keys;
+char tempString[MAX_STRING_SIZE];
+//Socket Parameter
+//int clientsock;
+int listensock;
+
+//While loop parameters
+int wait_for_connections ;
+int wait_for_commands;
+
+double total_server_process_time;
+
+
+/**
+ * @brief Process a command from the client.
+ *
+ * @param sock The socket connected to the client.
+ * @param cmd The command received from the client.
+ * @return Returns 0 on success, -1 otherwise.
+ */
+int handle_command(int sock, char *cmd)
+{
+char tempString [MAX_STRING_SIZE];
+sprintf(tempString, "[LOG] Processing command '%s'\n", cmd);
+logger(ServerFileLog, tempString); // replace LOG commands with logger() calls
+
+// For now, just send back the command to the client.
+sendall(sock, cmd, strlen(cmd));
+sendall(sock, "\n", 1);
+
+return 0;
+}
+
+
+/**
+ * @brief Process a Authenticate function 
+ *
+ * @param command The command received from the client.
+ * @return void
+ */
+
+void Authenticate(char ** command, int clientsock ) {
+	//getting the password and username
+		char * username = getNextWord(command, '#');
+		char * password = getNextWord(command, '#');
+
+		//comparing the encrypted password
+		//1) Encrypted password - no match
+		//	 Username - nomatch
+		if (strcmp(password, params.password) != 0 || strcmp(username, params.username) != 0) {
+
+			//message to the client
+			sprintf(message, "Error#%d#", ERR_AUTHENTICATION_FAILED);
+
+			//send the message
+			int status1 = handle_command(clientsock, message);
+			if (status1 != 0)
+				wait_for_commands = 0; // Oops.  An error occured.
+		}
+
+		//2) Encrypted password - match
+		// Username - match
+		else {
+			params.authorized = true;
+			sprintf(message, "SUCCESS");
+			handle_command(clientsock, message);
+		}
+
+		//deallocating memory
+		free(username);
+		free(password);
+}
+
+/**
+ * @brief Process a Get function 
+ *
+ * @param command The command received from the client.
+ * @return void
+ */
+
+void Get(char ** command, int clientsock ) {
+
+	printf("i get the value here1");
+	char tempString[MAX_STRING_SIZE];
+	// 0) Not Authenticated
+	if(!params.authorized){
+		sprintf(message, "Error#%d#", ERR_NOT_AUTHENTICATED);
+		handle_command(clientsock, message);
+		return;
+	}
+
+	//getting table and key 
+	char *table = getNextWord(command, '#');
+	char *key = getNextWord(command, '#');
+	int table_index = isTableNameExist(table, &params);
+
+
+	//dealing with only one table - from config file
+	printf("i get the value here2");
+
+	//1) tablename not found
+	if (table_index == -1) {
+		//message to the client
+		sprintf(message, "Error#%d#", ERR_TABLE_NOT_FOUND);
+
+		//send the message
+		int status1 = handle_command(clientsock, message);
+		if (status1 != 0)
+			wait_for_commands = 0; // Oops.  An error occured.
+		return;
+	}
+
+	struct timeval start_time, end_time;
+	gettimeofday(&start_time, NULL);
+	printf("i get the value here3");
+	//char* data = ht_get(ourHashTable[table_index], key);
+
+	//pthread_mutex_lock( &getMutex ); 	
+	Entry* data = ht_get(ourHashTable[table_index], key);
+	//pthread_mutex_unlock( &getMutex ); 
+	//sets the metabase value to the previousMeta value.
+
+	gettimeofday(&end_time, NULL);
+    double tempEvaluationTime = (end_time.tv_usec) - (start_time.tv_usec);
+    total_server_process_time += tempEvaluationTime;
+    sprintf(tempString, "[PERFORMANCE] Server GET Processing Time: %lf microseconds.\n", tempEvaluationTime);
+    logger(ServerFileLog, tempString);
+    sprintf(tempString, "[PERFORMANCE] Current Server Total Processing Time: %lf microseconds.\n", total_server_process_time);
+    logger(ServerFileLog, tempString);
+
+    printf("i get the value here4");
+	//2) keyvalue not found
+	
+	if (data == NULL ) {
+		sprintf(message, "Error#%d#", ERR_KEY_NOT_FOUND);
+		handle_command(clientsock, message);
+		return;
+	}
+
+	char metadata[MAX_STRING_SIZE]; 
+	sprintf(metadata, "%d", data->metadata);
+
+	//3) everything fine
+	if (data != NULL){
+		sprintf(message, "SUCCESS#%s#%s#%s#", key, data->value, metadata);
+		handle_command(clientsock, message);
+	}
+
+	//deallocating memory
+	free(table);
+	free(key);
+}
+
+/**
+ * @brief Process a Set function 
+ *
+ * @param command The command received from the client.
+ * @return void
+ */
+
+void Set( char ** command, int clientsock ) {
+
+	char tempString[MAX_STRING_SIZE];
+		// 0) Not Authenticated
+		if(!params.authorized){
+			errno = ERR_NOT_AUTHENTICATED;
+			sprintf(message, "Error#%d#", errno);
+			handle_command(clientsock, message);
+			return;
+		}
+
+		//getting table, key, and value
+		char *table = getNextWord(command, '#');
+		char *key = getNextWord(command, '#');
+		char *value = getNextWord(command, '#');
+		char *metadata = getNextWord(command, '#');
+
+
+
+		int table_index = isTableNameExist(table, &params);
+		char *p;
+		long int metaData = strtol(metadata, &p, 10);
+
+		printf("Parsed Set\n" );
+		//1) tablename not found
+		if (table_index == -1) {
+			//message to the client
+			sprintf(message, "Error#%d#", ERR_TABLE_NOT_FOUND);
+
+			//send the message
+			int status1 = handle_command(clientsock, message);
+			if (status1 != 0)
+				wait_for_commands = 0; // Oops.  An error occured.
+			return;
+		}
+
+		//2) Deleting Process
+		if (strlen(value) == 0) {
+
+			int isDeleted = ht_removeItem(ourHashTable[table_index], key);
+
+			if (isDeleted == HASH_SET_DELETE)
+				handle_command(clientsock, "DELETE#");
+			else {
+				sprintf(message, "Error#%d#",ERR_KEY_NOT_FOUND );
+				handle_command(clientsock, message);
+			}
+			return;
+		}
+
+ 		
+ 		// 4) UPLOAD function
+		if (strcmp(key, "UPLOAD") == 0 && strcmp(value, "UPLOAD") == 0) {
+			int status = upload(table_index);
+			if (status == 0) {
+				sprintf(message, "UPLOAD#");
+				handle_command(clientsock, message);
+			}
+			else {
+				sprintf(message, "Error#%d#",ERR_UNKNOWN );
+				handle_command(clientsock, message);
+			}
+			return;
+		}
+		
+		//3) Check if the input string format is correct
+		if (strcmp(key, "UPLOAD") != 0 && strcmp(value, "UPLOAD") != 0 && strlen(value) != 0 ) {
+			
+			printf("insert isInputValid Function \n");
+			bool Input_String_Format = isInputFormatCorrect(value, &params, table_index);
+			if (Input_String_Format == false) {
+				sprintf(message, "Error#%d#", ERR_INVALID_PARAM);
+
+				//send the message
+				int status1 = handle_command(clientsock, message);
+				if (status1 != 0)
+					wait_for_commands = 0; // Oops.  An error occured.
+				return;
+			}
+		}
+
+
+		//gets the metadat value
+		//1) if the metadata == 0 just set
+		//2) if the metadata is nonzero, compare with the value from the hashtable
+
+		Entry* data = ht_get(ourHashTable[table_index], key);
+
+		if (data != NULL && metaData != 0 && data->metadata != metaData) {
+			sprintf(message, "Error#%d#",ERR_TRANSACTION_ABORT );
+			handle_command(clientsock, message);
+			return;
+		}
+
+		// the data doesn't exist but the metaData is not zero
+		if (data == NULL && metaData != 0) {
+			sprintf(message, "Error#%d#",ERR_TRANSACTION_ABORT );
+			handle_command(clientsock, message);
+			return;
+		}
+
+		struct timeval start_time, end_time;
+    	gettimeofday(&start_time, NULL);
+
+    	pthread_mutex_lock( &setMutex );
+		int status = ht_set(ourHashTable[table_index], key, value);
+		pthread_mutex_unlock( &setMutex ); 
+
+		gettimeofday(&end_time, NULL);
+	    double tempEvaluationTime = (end_time.tv_usec) - (start_time.tv_usec);
+	    total_server_process_time += tempEvaluationTime;
+	    sprintf(tempString, "[PERFORMANCE] Server SET Processing Time: %lf microseconds.\n", tempEvaluationTime);
+	    logger(ServerFileLog, tempString);
+	    sprintf(tempString, "[PERFORMANCE] Current Server Total Processing Time: %lf microseconds.\n", total_server_process_time);
+	    logger(ServerFileLog, tempString);
+
+
+		//updating data
+		if (status == HASH_SET_UPDATE) {
+			handle_command(clientsock, "MODIFY#");
+		}
+
+		//inserting the data
+		else if (status == HASH_SET_INSERT) 
+		{
+			handle_command(clientsock, "INSERT#");
+		}
+
+		//deallocating memory
+		free(metadata); 
+		free(table);
+		free(key);
+		free(value);	
+}
+
+/**
+ * @brief Process a Query function 
+ *
+ * @param command The command received from the client.
+ * @return void
+ */
+void Query(char ** command,int clientsock ){
+	char tempString[MAX_STRING_SIZE];
+	
+		// 0) Not Authenticated
+		if(!params.authorized){
+			errno = ERR_NOT_AUTHENTICATED;
+			sprintf(message, "Error#%d#", errno);
+			handle_command(clientsock, message);
+			return;
+		}
+
+		//getting table, predicates, and max_key
+		char *table = getNextWord(command, '#');
+		char *predicates = getNextWord(command, '#');
+		char *tempMax_keys = getNextWord(command, '#');
+		int table_index = isTableNameExist(table, &params);
+
+
+		long int max_keys;
+		char* p;
+		max_keys = strtol(tempMax_keys, &p, 10);
+
+
+		//1) tablename not found
+		if (table_index == -1) {
+			//message to the client
+			sprintf(message, "Error#%d#", ERR_TABLE_NOT_FOUND);
+
+			//send the message
+			int status1 = handle_command(clientsock, message);
+			if (status1 != 0)
+				wait_for_commands = 0; // Oops.  An error occured.`
+			return;
+		}
+
+    	char * keys[max_keys];
+    	int i;
+    	for (i = 0; i < max_keys; i++)
+    		keys[i] = NULL;
+
+
+        //Allocate predicates in predicate struct
+        int numPredicates = getNumPredicates(predicates);
+        //Allocate predicates
+       	
+
+       	Predicate* predLists = createPredicateList (numPredicates, predicates); 
+       	int value = isPredicateValid(predLists, &params, table_index, numPredicates);
+       	
+
+       	if (value == INVALID) {
+			//message to the client
+			sprintf(message, "Error#%d#", ERR_INVALID_PARAM);
+
+			//send the message
+			int status1 = handle_command(clientsock, message);
+			if (status1 != 0)
+				wait_for_commands = 0; // Oops.  An error occured.`
+			return;
+		}
+
+       	struct timeval start_time, end_time;
+    	gettimeofday(&start_time, NULL);
+
+        int status = ht_query (ourHashTable[table_index], predLists, numPredicates, keys, max_keys);   
+
+        gettimeofday(&end_time, NULL);
+	    double tempEvaluationTime = (end_time.tv_usec) - (start_time.tv_usec);
+	    total_server_process_time += tempEvaluationTime;
+	    sprintf(tempString, "[PERFORMANCE] Server QUERY Processing Time: %lf microseconds.\n", tempEvaluationTime);
+	    logger(ServerFileLog, tempString);
+	    sprintf(tempString, "[PERFORMANCE] Current Server Total Processing Time: %lf microseconds.\n", total_server_process_time);
+	    logger(ServerFileLog, tempString); 
+
+        //Free the 2D array of keys
+   	 
+   	 	int x = 0;
+   	 	char *keyMessage = NULL;  	 	
+
+   	 	for (x = 0; x < max_keys && x < status; x++){
+   	 		if(keys[x]!=NULL)
+   	 		{
+   	 			printf("Found keys");
+   	 			if(x == 0){
+   	 				printf("Created message to send all the keys back\n");
+   	 				keyMessage = myStrDup(keys[x]);
+   	 				keyMessage = addStringSecond(keyMessage,HASHTAG);
+   	 			}
+   	 			else{
+   	 				keyMessage = addStringSecond(keyMessage,keys[x]);
+   	 				keyMessage = addStringSecond(keyMessage,HASHTAG);
+   	 			}
+   	 		}
+
+   	 	}
+
+   	 	for (i = 0; i < max_keys; i++){
+   	 		if (keys[i] != NULL){
+   	 			free (keys[i]);
+   	 		}
+   	 	}
+
+
+		if (status == -1) {
+			sprintf(message, "Error#%d#",ERR_KEY_NOT_FOUND );
+			handle_command(clientsock, message);
+		}
+
+		//Keys Found
+		else  
+		{
+			sprintf(message, "SUCCESS#%d#%s",status,keyMessage );
+			printf("%s\n",keyMessage);
+			handle_command(clientsock, message);
+		}
+		//deallocating memory
+		free(table);
+		free(predicates);
+		free(tempMax_keys);
+		printf("Before free\n");
+		if(keyMessage != NULL){
+			printf("During free1\n");
+			free(keyMessage);	
+			printf("During free2\n");
+		}
+		printf("After free\n"); 
+}
+
+
+/*
+bool columnName_checker(char *columnName)
+{
+	//Check with table schema for valid parameters
+	return false;
+} */
+/**
+ * @brief Uploading census.txt file to the data structure
+ *
+ * @return void
+ */
+
+int upload(int table_index) {
+
+	char *census_config_file = "../data/census.conf";
+	int status = CheckConfigFile(census_config_file, &census_params);
+	
+	if (status != 0)
+		return -1;
+
+	FILE *fp;
+	fp = fopen("../data/census/census.csv","r");
+   	if ( fp != NULL )
+	{
+		char *line = (char *)malloc((MAX_STRING_SIZE) * sizeof(char) ); // or other suitable maximum line size 
+
+
+		while ( fgets ( line, MAX_STRING_SIZE, fp ) != NULL )//  read a line 
+		{
+			char *linePointer = line;
+			
+			char* kkey = getNextWord(&linePointer, ',');
+			char* vvalue = getNextWord(&linePointer, '\n');
+
+			ht_set( ourHashTable[table_index], kkey, vvalue);
+
+			free(kkey);
+			free(vvalue);
+		}
+		free(line);
+	    fclose ( fp );
+	}
+	return 0;
+}
+
+/**
+ * @brief Check the validity of the Configuration file. 
+ *
+ * @param config_file the config_file name.
+ * @return Returns 0 on success, exit otherwise.
+ */
+int CheckConfigFile(char * config_file, struct config_params* params ) {
+	strcpy(params->username, "NOTINIT");
+	strcpy(params->password, "NOTINIT");
+	strcpy(params->server_host, "NOTINIT");
+	params->table_number =0;
+	params->server_port =0;
+	params->concurrencyMode = -1;
+
+	//updating the config file with bison and flex
+	int status;
+	status =  parse(config_file, params);
+
+	//checking if the config file is valid
+	bool isValidColumn = isValidColumnIndex(params);
+
+	if (isValidColumn == false) {
+		status =  -1;
+	}
+
+
+	if (strcmp(params->username, "NOTINIT") == 0 || strcmp(params->password, "NOTINIT") == 0 
+			|| strcmp(params->server_host, "NOTINIT") == 0 || params->table_number == 0 || params->server_port == 0
+			|| params->password == 0 || params->concurrencyMode == -1) 
+		status =  -1;
+
+	return status; 
+
+}
+
+/**
+ * @brief Initialize the logger File Setting 
+ *
+ * @return void.
+ */
+
+void Initialize() {
+
+	//logger File
+	char tempString[MAX_STRING_SIZE];
+	time_t rawtime;
+    struct tm *tm_struct;
+    time (&rawtime);
+    tm_struct = localtime (&rawtime);
+	sprintf(tempString, "Server-%d-%d-%d-%d-%d-%d.log", 1900+tm_struct->tm_year, 1+tm_struct->tm_mon, tm_struct->tm_mday, tm_struct->tm_hour, 	  tm_struct->tm_min, tm_struct->tm_sec);
+	
+	if (LOGGING == 2){
+   		ServerFileLog = fopen(tempString, "a");
+   	}else if (LOGGING == 1){
+   		ServerFileLog = stdout;
+   	}else{
+   		ServerFileLog = NULL;
+   	}
+
+   	//initialize threadcounter
+   	ThreadCounter = 0;
+   	printf("ThreadCounter = %d\n", ThreadCounter);
+}
+
+/**
+ * @brief Deallocate all the hash tables
+ *
+ * @return void.
+ */
+
+void RemoveHashTables () {
+	int i;
+	for (i=0;i < params.table_number; i++ )
+		ht_removeAll(ourHashTable[i]);
+}
+
+
+
+ThreadInfo getThreadInfo(void) { 
+  ThreadInfo currThreadInfo = NULL;
+
+  /* Wait as long as there are no more threads in the buffer */ 
+  pthread_mutex_lock( &conditionMutex ); 
+  while (((botRT+1)%MAX_THREADS)==topRT)
+  pthread_cond_wait(&conditionCond,&conditionMutex); 
+  
+  /* At this point, there is at least one thread available for us. We
+     take it, and update the circular buffer  */ 
+  currThreadInfo = runtimeThreads[botRT]; 
+  botRT = (botRT + 1)%MAX_THREADS;
+
+  /* Release the mutex, so other clients can add threads back */ 
+  pthread_mutex_unlock( &conditionMutex ); 
+  
+  return currThreadInfo;
+}
+
+/* Function called when thread is about to finish -- unless it is
+   called, the ThreadInfo assigned to it is lost */ 
+void releaseThread(ThreadInfo me) {
+  pthread_mutex_lock( &conditionMutex ); 
+  //assert( botRT!=topRT ); 
+ 
+  runtimeThreads[topRT] = me; 
+  topRT = (topRT + 1)%MAX_THREADS; 
+
+  /* tell getThreadInfo a new thread is available */ 
+  pthread_cond_signal( &conditionCond ); 
+
+  /* Release the mutex, so other clients can get new threads */ 
+  pthread_mutex_unlock( &conditionMutex ); 
+}
+
+
+/* This function receives a string from clients and echoes it back --
+   the thread is released when the thread is finished */
+void * threadCallFunction(void *arg) { 
+  printf("successfully created a thread\n");
+
+  ThreadInfo tiInfo = (ThreadInfo)arg; 
+  CommandHandler(&(tiInfo->clientsock));
+
+  printf("Releasing the thread \n");
+  releaseThread( tiInfo ); 
+  return NULL; 
+}
+
+
+
+void CommandHandler ( int*clientsock ) {
+	char tempString[MAX_STRING_SIZE];
+
+	// Listen loop.
+	wait_for_connections = 1;
+	while (wait_for_connections) {
+
+
+
+		//get command from the client
+		wait_for_commands = 1;
+		commandPointer = (char *)malloc(sizeof(char) * MAX_CMD_LEN);
+		char *command = commandPointer;
+		message = (char *)malloc(sizeof(char) * MAX_CMD_LEN);
+
+		do {
+			printf("came in here with %d\n", *clientsock);
+			int status1 = recvline(*clientsock, command, MAX_CMD_LEN);
+
+			// Either an error occurred or the client closed the connection.
+			if (status1 != 0) {
+				wait_for_commands = 0;
+			}
+
+			else {
+			//getting the function word
+				printf("goes in the else statement \n");
+
+				char *function = getNextWord(&command, '#');
+				printf("goes in the else statement 1 %s\n", function);
+				//1) Authenticate Function
+				if (strcmp(function, "AUTH") == 0) {
+					Authenticate(&command, *clientsock);
+				}
+				//parallize as much as i can
+		
+				//2) GET Function
+				else if (strcmp(function, "GET") == 0) {
+					Get(&command, *clientsock);
+				}
+
+				//3) SET Function
+				else if (strcmp(function, "SET") == 0) {
+					Set(&command, *clientsock);
+				}
+
+				else if (strcmp(function, "QUERY") == 0) {
+					Query(&command, *clientsock);
+				}
+
+				//deallocating memory
+				free(function);
+			}
+		} while (wait_for_commands);
+
+		//deallocating memory
+		free(commandPointer);
+		free(message);
+
+		// Close the connection with the client.
+		printf("closing client socket \n");
+		wait_for_connections = 0;
+
+		close(*clientsock);
+		//sprintf(tempString,"[LOG] Closed connection from %s:%d.\n", inet_ntoa(clientaddr.sin_addr), clientaddr.sin_port);
+		//logger(ServerFileLog, tempString);
+	}
+}
+
+void MultiThreadMode()  {
+
+	//Listening for any connection
+   int status = listen(listensock, MAX_LISTENQUEUELEN);
+   printf("listened\n");
+  if (status != 0) { 
+    printf("Error listening.\n"); 
+    return -1; 
+  }
+
+  int i;
+  // First, we allocate the thread pool 
+  for (i = 0; i!=MAX_THREADS; ++i)
+    runtimeThreads[i] = malloc( sizeof( struct _ThreadInfo ) ); 
+
+  while (1) { 
+    ThreadInfo tiInfo = getThreadInfo(); 
+    tiInfo->clientaddrlen = sizeof(struct sockaddr_in); 
+    tiInfo->clientsock = accept(listensock, (struct sockaddr*)&tiInfo->clientaddr, &tiInfo->clientaddrlen);
+  	  printf("accepted\n");
+
+    // accepting the client socket fails
+    if (tiInfo->clientsock <0) {
+      pthread_mutex_lock( &printMutex ); 
+      printf("ERROR in connecting to %s:%d.\n", 
+	     inet_ntoa(tiInfo->clientaddr.sin_addr), tiInfo->clientaddr.sin_port);
+      pthread_mutex_unlock( &printMutex ); 
+    } 
+
+    // succeeded in listening -> create thread
+    else {
+      pthread_create( &tiInfo->theThread, NULL, threadCallFunction, tiInfo ); 
+    }
+  } 
+
+  /* At the end, wait until all connections close */ 
+  for (i=topRT; i!=botRT; i = (i+1)%MAX_THREADS)
+    pthread_join(runtimeThreads[i]->theThread, 0 ); 
+
+  /* Deallocate all the resources */ 
+  for (i=0; i!=MAX_THREADS; i++)
+    free( runtimeThreads[i] ); 
+}
+
+void NoConcurrentMode() {
+
+  	// Listen for connections.
+	int status = listen(listensock, MAX_LISTENQUEUELEN);
+	if (status != 0) {
+		printf("Error listening on socket.\n");
+		errno = ERR_UNKNOWN;
+		exit(EXIT_FAILURE);
+	}
+
+	// Listen loop.
+	wait_for_connections = 1;
+	while (wait_for_connections) {
+
+		// Wait for a connection.
+		struct sockaddr_in clientaddr;
+		socklen_t clientaddrlen = sizeof clientaddr;
+		int clientsock = accept(listensock, (struct sockaddr*)&clientaddr, &clientaddrlen);
+		if (clientsock < 0) {
+			printf("Error accepting a connection.\n");
+			errno = ERR_CONNECTION_FAIL;
+			exit(EXIT_FAILURE);
+		}
+
+		//logger
+		sprintf(tempString, "[LOG] Got a connection from %s:%d.\n", inet_ntoa(clientaddr.sin_addr), clientaddr.sin_port);
+		logger(ServerFileLog, tempString);
+		params.authorized = false;
+
+		//get command from the client
+		wait_for_commands = 1;
+		commandPointer = (char *)malloc(sizeof(char) * MAX_CMD_LEN);
+		command = commandPointer;
+		message = (char *)malloc(sizeof(char) * MAX_CMD_LEN);
+
+		do {
+			int status1 = recvline(clientsock, command, MAX_CMD_LEN);
+
+			// Either an error occurred or the client closed the connection.
+			if (status1 != 0) {
+
+				wait_for_commands = 0;
+			}
+
+
+			else {
+			//getting the function word
+				char *function = getNextWord(&command, '#');
+
+				//1) Authenticate Function
+				if (strcmp(function, "AUTH") == 0) {
+					Authenticate(&command, clientsock);
+				}
+				
+				//2) GET Function
+				else if (strcmp(function, "GET") == 0) {
+					Get(&command,clientsock);
+				}
+
+				//3) SET Function
+				else if (strcmp(function, "SET") == 0) {
+					Set(&command, clientsock);
+				}
+
+				else if (strcmp(function, "QUERY") == 0) {
+					Query(&command, clientsock);
+				}
+				//deallocating memory
+				free(function);
+			}
+		} while (wait_for_commands);
+
+		//deallocating memory
+		free(commandPointer);
+		free(message);
+
+		// Close the connection with the client.
+		close(clientsock);
+		sprintf(tempString,"[LOG] Closed connection from %s:%d.\n", inet_ntoa(clientaddr.sin_addr), clientaddr.sin_port);
+		logger(ServerFileLog, tempString);
+	}
+}
+
+/**
+ * @brief Start the storage server.
+ *
+ * This is the main entry point for the storage server.  It reads the
+ * configuration file, starts listening on a port, and proccesses
+ * commands from clients.
+ */
+
+int main(int argc, char *argv[])
+{
+
+	total_server_process_time = 0;
+	//Initialize 
+	char tempString[MAX_STRING_SIZE];
+	Initialize();
+   	
+	// Process command line arguments.
+	// This program expects exactly one argument: the config file name.
+	//assert(argc > 0);
+	if (argc != 2) {
+		printf("Usage %s <config_file>\n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
+	char *config_file = argv[1];
+
+	// Checking Config File
+	int status = CheckConfigFile(config_file, &params);
+
+	if (status != 0) {
+		printf("Error processing config file.\n");
+		errno = ERR_UNKNOWN;
+		exit(EXIT_FAILURE);
+	}
+
+	sprintf (tempString,  "[LOG] Server on %s:%d\n", params.server_host, params.server_port);
+	logger(ServerFileLog,tempString);
+
+	// Create a socket.
+	listensock = socket(PF_INET, SOCK_STREAM, 0);
+	if (listensock < 0) {
+		printf("Error creating socket.\n");
+		errno = ERR_UNKNOWN;
+		exit(EXIT_FAILURE);
+	}
+
+	// Allow listening port to be reused if defunct.
+	int yes = 1;
+	status = setsockopt(listensock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+	if (status != 0) {
+		printf("Error configuring socket.\n");
+		errno = ERR_UNKNOWN;
+		exit(EXIT_FAILURE);
+	}
+
+	// Bind it to the listening port.
+	struct sockaddr_in listenaddr;
+	memset(&listenaddr, 0, sizeof listenaddr);
+	listenaddr.sin_family = AF_INET;
+	listenaddr.sin_port = htons(params.server_port);
+	inet_pton(AF_INET, params.server_host, &(listenaddr.sin_addr)); // bind to local IP address
+	status = bind(listensock, (struct sockaddr*) &listenaddr, sizeof listenaddr);
+	if (status != 0) {
+		printf("Error binding socket.\n");
+		errno = ERR_UNKNOWN;
+		exit(EXIT_FAILURE);
+	}
+
+	if (params.concurrencyMode == 0){
+		printf ("Goes in here\n");
+				NoConcurrentMode();
+	}
+
+
+	if(params.concurrencyMode == 1) 
+		MultiThreadMode();
+
+	
+	// Stop listening for connections.
+	sprintf(tempString, "[PERFORMANCE] TOTAL SERVER PROCESSING TIME: %lf microseconds.\n", total_server_process_time);
+	logger(ServerFileLog, tempString);
+	RemoveHashTables();
+	close(listensock);
+	if (ServerFileLog != NULL)
+		fclose(ServerFileLog);
+	return EXIT_SUCCESS;
+}
